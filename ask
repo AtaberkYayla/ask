@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# ask - Send prompts to an LLM via an OpenAI-compatible chat completions API.
+# Dependencies: curl, jq
+# Environment variables:
+#   ASK_API_URL  - Chat completions endpoint (e.g. https://api.groq.com/openai/v1/chat/completions)
+#   ASK_MODEL    - Model name            (e.g. llama-3.3-70b-versatile)
+#   ASK_API_KEY  - Bearer token / API key
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Validate environment variables
+# ---------------------------------------------------------------------------
+: "${ASK_API_URL:?Environment variable ASK_API_URL is not set.}"
+: "${ASK_MODEL:?Environment variable ASK_MODEL is not set.}"
+: "${ASK_API_KEY:?Environment variable ASK_API_KEY is not set.}"
+
+# ---------------------------------------------------------------------------
+# Build the user prompt
+#   - Command-line arguments are joined with spaces.
+#   - If stdin is not a terminal (i.e. something is piped in), that text is
+#     appended after the arguments (separated by a newline).
+# ---------------------------------------------------------------------------
+arg_prompt="${*}"          # join all positional arguments
+
+pipe_input=""
+if [ ! -t 0 ]; then        # stdin is not a TTY → data is being piped in
+    pipe_input="$(cat)"
+fi
+
+# Require at least one source of input
+if [ -z "${arg_prompt}" ] && [ -z "${pipe_input}" ]; then
+    echo "Usage: ask [prompt words...]" >&2
+    echo "       echo 'text' | ask [optional prefix...]" >&2
+    exit 1
+fi
+
+# Combine: if both exist, put the argument prompt first, then the piped text
+if [ -n "${arg_prompt}" ] && [ -n "${pipe_input}" ]; then
+    user_prompt="${arg_prompt}"$'\n'"${pipe_input}"
+elif [ -n "${arg_prompt}" ]; then
+    user_prompt="${arg_prompt}"
+else
+    user_prompt="${pipe_input}"
+fi
+
+# ---------------------------------------------------------------------------
+# Build the JSON payload with jq (handles escaping automatically)
+# ---------------------------------------------------------------------------
+payload=$(jq -n \
+    --arg model    "${ASK_MODEL}" \
+    --arg content  "${user_prompt}" \
+    '{
+        model: $model,
+        messages: [
+            {
+                role: "system",
+                content: "You are a CLI tool. Output plain text only. No yapping. Keep the output concise."
+            },
+            {
+                role: "user",
+                content: $content
+            }
+        ]
+    }')
+
+# ---------------------------------------------------------------------------
+# Send the request and extract the reply text
+# ---------------------------------------------------------------------------
+response=$(curl -s \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${ASK_API_KEY}" \
+    -d "${payload}" \
+    "${ASK_API_URL}")
+
+# Check for API-level errors
+error=$(echo "${response}" | jq -r '.error.message // empty')
+if [ -n "${error}" ]; then
+    echo "API error: ${error}" >&2
+    exit 1
+fi
+
+# Print the assistant reply
+echo "${response}" | jq -r '.choices[0].message.content'
